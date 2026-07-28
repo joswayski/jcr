@@ -41,7 +41,6 @@ mod tests {
         net::SocketAddr,
         path::Path,
         process::{Command, Stdio},
-        sync::Arc,
         time::Duration,
     };
 
@@ -77,7 +76,7 @@ mod tests {
         config::{Config, RegistrationMode},
         db::{self, VerifiedLogin},
         state::AppState,
-        storage::{BucketOptions, FilesystemBlobStore},
+        storage::BucketOptions,
     };
 
     const CLOUDFLARE_FREE_PRO_MAX_REQUEST_BYTES: usize = 100_000_000;
@@ -107,12 +106,21 @@ mod tests {
             upload_session_hours: 24,
             gc_grace_days: 7,
             storage: BucketOptions {
-                endpoint: "http://127.0.0.1:1".to_owned(),
-                region: "test".to_owned(),
-                bucket: "unused".to_owned(),
-                access_key_id: "unused".to_owned(),
-                secret_access_key: "unused".to_owned(),
-                force_path_style: true,
+                endpoint: std::env::var("JCR_TEST_BUCKET_ENDPOINT")
+                    .unwrap_or_else(|_| "http://127.0.0.1:9000".to_owned()),
+                region: std::env::var("JCR_TEST_BUCKET_REGION")
+                    .unwrap_or_else(|_| "garage".to_owned()),
+                bucket: std::env::var("JCR_TEST_BUCKET_NAME").unwrap_or_else(|_| "jcr".to_owned()),
+                access_key_id: std::env::var("JCR_TEST_BUCKET_ACCESS_KEY_ID")
+                    .unwrap_or_else(|_| "GK0123456789abcdef0123456789abcdef".to_owned()),
+                secret_access_key: std::env::var("JCR_TEST_BUCKET_SECRET_ACCESS_KEY")
+                    .unwrap_or_else(|_| {
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .to_owned()
+                    }),
+                force_path_style: std::env::var("JCR_TEST_BUCKET_FORCE_PATH_STYLE")
+                    .map(|value| value != "false")
+                    .unwrap_or(true),
             },
         };
         let pool = db::connect_and_migrate(&config).await.unwrap();
@@ -210,10 +218,8 @@ mod tests {
         let issued = db::create_pat(&pool, jose.id, "integration", None)
             .await
             .unwrap();
-        let storage = FilesystemBlobStore::new(directory.path().join("blobs"))
-            .await
-            .unwrap();
-        let state = AppState::new(config, pool.clone(), Arc::new(storage));
+        let storage = config.create_blob_store().await.unwrap();
+        let state = AppState::new(config, pool.clone(), storage);
         let application = router(state.clone());
         let network_application = application.clone();
         let server = tokio::spawn(async move {
