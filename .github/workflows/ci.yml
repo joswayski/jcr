@@ -30,13 +30,12 @@ jobs:
       JCR_DATABASE_URL: postgres://jcr:jcr@127.0.0.1:5432/jcr
       JCR_JWT_SECRET: ci-only-secret-with-at-least-32-bytes
       JCR_BOOTSTRAP_EMAIL: jose@example.com
-      JCR_TEST_S3_ENDPOINT: http://127.0.0.1:9000
-      JCR_TEST_S3_REGION: us-east-1
-      JCR_TEST_S3_BUCKET: jcr
-      JCR_TEST_S3_ACCESS_KEY_ID: minio
-      JCR_TEST_S3_SECRET_ACCESS_KEY: minio-password
-      JCR_TEST_S3_FORCE_PATH_STYLE: "true"
-      JCR_TEST_S3_CREATE_BUCKET: "1"
+      JCR_TEST_BUCKET_ENDPOINT: http://127.0.0.1:9000
+      JCR_TEST_BUCKET_REGION: garage
+      JCR_TEST_BUCKET_NAME: jcr
+      JCR_TEST_BUCKET_ACCESS_KEY_ID: GK0123456789abcdef0123456789abcdef
+      JCR_TEST_BUCKET_SECRET_ACCESS_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      JCR_TEST_BUCKET_FORCE_PATH_STYLE: "true"
       JCR_TEST_DOCKER_CLIENT: "1"
     steps:
       - uses: actions/checkout@v4
@@ -47,16 +46,20 @@ jobs:
         with:
           go-version: "1.26"
       - uses: Swatinem/rust-cache@v2
-      - name: Start MinIO
+      - name: Start Garage
         run: |
           docker run --detach --rm \
-            --name jcr-ci-minio \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minio \
-            --env MINIO_ROOT_PASSWORD=minio-password \
-            minio/minio:latest server /data
+            --name jcr-ci-garage \
+            --publish 9000:3900 \
+            --volume "${PWD}/dev/garage.toml:/etc/garage.toml:ro" \
+            --env GARAGE_CONFIG_FILE=/etc/garage.toml \
+            --env GARAGE_DEFAULT_ACCESS_KEY=GK0123456789abcdef0123456789abcdef \
+            --env GARAGE_DEFAULT_SECRET_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+            --env GARAGE_DEFAULT_BUCKET=jcr \
+            dxflrs/garage:v2.3.0 \
+            /garage server --single-node --default-bucket
           for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/live; then
+            if docker exec jcr-ci-garage /garage status; then
               exit 0
             fi
             sleep 1

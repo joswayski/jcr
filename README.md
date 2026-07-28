@@ -8,13 +8,9 @@ pulls. The `jcr` client adds deterministic, resumable 64 MiB layer uploads so
 large pushes can traverse HTTP proxies with bounded request sizes without
 introducing a custom image format.
 
-This repository is intentionally scoped to the registry application. It does
-not configure a home server, Kubernetes, Cloudflare, Railway, backups, or
-application migrations.
-
 ## Workspace
 
-- `jcrd` — OCI registry, token service, metadata API, and owner web UI.
+- `jcrd` — OCI registry, token service, metadata API, and web UI.
 - `jcr` — Docker-credential-compatible login and chunked push client.
 - `jcr-core` — shared digest, manifest, reference, scope, and storage types.
 
@@ -29,7 +25,7 @@ Requirements:
 - Rust 1.94 or newer
 - Docker with Compose
 
-Start PostgreSQL and MinIO:
+Start PostgreSQL and Garage:
 
 ```console
 docker compose up -d
@@ -39,16 +35,16 @@ Copy `.env.example` to `.env`. Replace the JWT secret and bootstrap email with
 real values. `jcrd` loads this file automatically for local development.
 
 The zero-dependency development default stores blobs on the filesystem. To run
-the application against MinIO instead, set:
+the application against the local Garage bucket instead, set:
 
 ```dotenv
-JCR_STORAGE_BACKEND=s3
-JCR_S3_ENDPOINT=http://127.0.0.1:9000
-JCR_S3_REGION=us-east-1
-JCR_S3_BUCKET=jcr
-JCR_S3_ACCESS_KEY_ID=minio
-JCR_S3_SECRET_ACCESS_KEY=minio-password
-JCR_S3_FORCE_PATH_STYLE=true
+JCR_STORAGE_BACKEND=bucket
+JCR_BUCKET_ENDPOINT=http://127.0.0.1:9000
+JCR_BUCKET_REGION=garage
+JCR_BUCKET_NAME=jcr
+JCR_BUCKET_ACCESS_KEY_ID=GK0123456789abcdef0123456789abcdef
+JCR_BUCKET_SECRET_ACCESS_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+JCR_BUCKET_FORCE_PATH_STYLE=true
 ```
 
 Start the server:
@@ -57,8 +53,7 @@ Start the server:
 cargo run -p jcrd
 ```
 
-The local registry listens on `http://127.0.0.1:5000`, and its owner UI is at
-`http://127.0.0.1:5000/registry`.
+The local server listens on `http://127.0.0.1:5000`.
 
 Google login is enabled only when all three Google OAuth settings in
 `.env.example` are present. The first verified login matching
@@ -68,7 +63,8 @@ user.
 
 ## Using the clients
 
-Create a personal access token in the owner UI, then use it with either client.
+Create a personal access token in the `/registry` web UI, then use it with
+either client.
 
 ```console
 jcr login 127.0.0.1:5000 --username jose
@@ -102,9 +98,10 @@ docker pull 127.0.0.1:5000/jose/app:latest
 
 ## Storage configuration
 
-R2 uses the same `s3` backend as MinIO. Switching providers is configuration
-only: endpoint, region, bucket, credentials, and path-style behavior. No
-R2-specific behavior exists in the registry domain model.
+The `bucket` backend uses the S3-compatible API implemented by providers such as
+Garage and R2; it does not require AWS S3. Switching providers is configuration
+only: endpoint, region, bucket name, credentials, and path-style behavior. No
+provider-specific behavior exists in the registry domain model.
 
 Committed blob bytes live in the configured object store. PostgreSQL stores
 identity, authorization, repository, upload, descriptor, tag-history, and
@@ -113,23 +110,30 @@ audit metadata.
 ## Verification
 
 The normal local suite includes unit tests plus the PostgreSQL registry flow and
-the first-party client passing through a reverse proxy capped at 100 MB:
+the first-party client passing through a reverse proxy capped at `100,000,000`
+request-body bytes. This matches the 100 MB maximum upload size documented for
+Cloudflare Free and Pro traffic; Cloudflare recommends splitting larger
+uploads into smaller requests to avoid a `413`.
+[Cloudflare's limit varies by plan](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-413/).
+The limit applies to each HTTP request, not the complete image. A 64 MiB JCR
+chunk is about 67.1 MB, so a larger blob crosses the proxy as a sequence of
+individually accepted requests.
 
 ```console
 JCR_DATABASE_URL=postgres://jcr:jcr@127.0.0.1:5432/jcr \
   cargo test --workspace --all-features
 ```
 
-Exercise the S3 adapter against local MinIO:
+Exercise the bucket adapter against local Garage:
 
 ```console
-JCR_TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
-JCR_TEST_S3_REGION=us-east-1 \
-JCR_TEST_S3_BUCKET=jcr \
-JCR_TEST_S3_ACCESS_KEY_ID=minio \
-JCR_TEST_S3_SECRET_ACCESS_KEY=minio-password \
-JCR_TEST_S3_FORCE_PATH_STYLE=true \
-  cargo test -p jcrd storage::s3::tests -- --nocapture
+JCR_TEST_BUCKET_ENDPOINT=http://127.0.0.1:9000 \
+JCR_TEST_BUCKET_REGION=garage \
+JCR_TEST_BUCKET_NAME=jcr \
+JCR_TEST_BUCKET_ACCESS_KEY_ID=GK0123456789abcdef0123456789abcdef \
+JCR_TEST_BUCKET_SECRET_ACCESS_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+JCR_TEST_BUCKET_FORCE_PATH_STYLE=true \
+  cargo test -p jcrd storage::bucket::tests -- --nocapture
 ```
 
 The same variables can target an explicitly disposable R2 bucket. Do not point
@@ -142,7 +146,9 @@ The integration flow has opt-in compatibility gates:
 - `JCR_TEST_CONFORMANCE_BINARY=/path/to/conformance.test` runs the official OCI
   Distribution conformance binary with the advertised pull and push categories.
 - `JCR_LARGE_TEST_MIB=500` or `1024` generates an incompressible layer of that
-  size and sends it through the 100 MB-capped proxy.
+  size and sends it through the Cloudflare-sized proxy limit. Those are test
+  fixtures, not maximum blob sizes: larger blobs continue in additional 64 MiB
+  requests until the configured bucket provider's multipart-object limit.
 
 For example:
 
@@ -155,7 +161,6 @@ JCR_LARGE_TEST_MIB=500 \
   -- --nocapture
 ```
 
-CI runs formatting, strict Clippy, MinIO integration, stock Docker
+CI runs formatting, strict Clippy, Garage integration, stock Docker
 compatibility, the PostgreSQL flow, and the pinned OCI Distribution v1.1.1
-pull/push conformance suite. Production deployment is deliberately not part of
-this repository.
+pull/push conformance suite.

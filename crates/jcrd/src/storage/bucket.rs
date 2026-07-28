@@ -16,7 +16,7 @@ use jcr_core::{BlobStore, BlobStream, CompletedPart, StorageError, StorageUpload
 use tokio_util::io::ReaderStream;
 
 #[derive(Clone, Debug)]
-pub struct S3Options {
+pub struct BucketOptions {
     pub endpoint: String,
     pub region: String,
     pub bucket: String,
@@ -26,13 +26,13 @@ pub struct S3Options {
 }
 
 #[derive(Clone, Debug)]
-pub struct S3BlobStore {
+pub struct BucketBlobStore {
     client: Client,
     bucket: String,
 }
 
-impl S3BlobStore {
-    pub async fn new(options: S3Options) -> Result<Self, StorageError> {
+impl BucketBlobStore {
+    pub async fn new(options: BucketOptions) -> Result<Self, StorageError> {
         let credentials = Credentials::new(
             options.access_key_id,
             options.secret_access_key,
@@ -62,7 +62,7 @@ impl S3BlobStore {
 }
 
 #[async_trait]
-impl BlobStore for S3BlobStore {
+impl BlobStore for BucketBlobStore {
     async fn initiate_upload(&self, key: &str) -> Result<StorageUpload, StorageError> {
         let output = self
             .client
@@ -72,9 +72,9 @@ impl BlobStore for S3BlobStore {
             .send()
             .await
             .map_err(Self::provider)?;
-        let upload_id = output
-            .upload_id()
-            .ok_or_else(|| StorageError::Provider("S3 omitted upload id".to_owned()))?;
+        let upload_id = output.upload_id().ok_or_else(|| {
+            StorageError::Provider("bucket provider omitted upload id".to_owned())
+        })?;
         Ok(StorageUpload {
             key: key.to_owned(),
             upload_id: upload_id.to_owned(),
@@ -100,9 +100,9 @@ impl BlobStore for S3BlobStore {
             .send()
             .await
             .map_err(Self::provider)?;
-        let etag = output
-            .e_tag()
-            .ok_or_else(|| StorageError::Provider("S3 omitted part ETag".to_owned()))?;
+        let etag = output.e_tag().ok_or_else(|| {
+            StorageError::Provider("bucket provider omitted part ETag".to_owned())
+        })?;
         Ok(CompletedPart {
             part_number,
             etag: etag.to_owned(),
@@ -236,25 +236,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn multipart_round_trip_when_s3_test_backend_is_configured() {
-        let Some(endpoint) = std::env::var("JCR_TEST_S3_ENDPOINT").ok() else {
-            eprintln!("skipping S3 integration; JCR_TEST_S3_ENDPOINT is unset");
+    async fn multipart_round_trip_when_bucket_test_backend_is_configured() {
+        let Some(endpoint) = std::env::var("JCR_TEST_BUCKET_ENDPOINT").ok() else {
+            eprintln!("skipping bucket integration; JCR_TEST_BUCKET_ENDPOINT is unset");
             return;
         };
-        let options = S3Options {
+        let options = BucketOptions {
             endpoint,
-            region: std::env::var("JCR_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
-            bucket: std::env::var("JCR_TEST_S3_BUCKET").unwrap_or_else(|_| "jcr".to_owned()),
-            access_key_id: std::env::var("JCR_TEST_S3_ACCESS_KEY_ID")
-                .expect("JCR_TEST_S3_ACCESS_KEY_ID is required"),
-            secret_access_key: std::env::var("JCR_TEST_S3_SECRET_ACCESS_KEY")
-                .expect("JCR_TEST_S3_SECRET_ACCESS_KEY is required"),
-            force_path_style: std::env::var("JCR_TEST_S3_FORCE_PATH_STYLE")
+            region: std::env::var("JCR_TEST_BUCKET_REGION")
+                .unwrap_or_else(|_| "us-east-1".to_owned()),
+            bucket: std::env::var("JCR_TEST_BUCKET_NAME").unwrap_or_else(|_| "jcr".to_owned()),
+            access_key_id: std::env::var("JCR_TEST_BUCKET_ACCESS_KEY_ID")
+                .expect("JCR_TEST_BUCKET_ACCESS_KEY_ID is required"),
+            secret_access_key: std::env::var("JCR_TEST_BUCKET_SECRET_ACCESS_KEY")
+                .expect("JCR_TEST_BUCKET_SECRET_ACCESS_KEY is required"),
+            force_path_style: std::env::var("JCR_TEST_BUCKET_FORCE_PATH_STYLE")
                 .map(|value| value != "false")
                 .unwrap_or(true),
         };
-        let store = S3BlobStore::new(options).await.unwrap();
-        let created_bucket = std::env::var("JCR_TEST_S3_CREATE_BUCKET").as_deref() == Ok("1");
+        let store = BucketBlobStore::new(options).await.unwrap();
+        let created_bucket = std::env::var("JCR_TEST_BUCKET_CREATE").as_deref() == Ok("1");
         if created_bucket {
             store
                 .client

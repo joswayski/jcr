@@ -1,5 +1,5 @@
+mod bucket;
 mod filesystem;
-mod s3;
 
+pub use bucket::{BucketBlobStore, BucketOptions};
 pub use filesystem::FilesystemBlobStore;
-pub use s3::{S3BlobStore, S3Options};

@@ -80,6 +80,8 @@ mod tests {
         storage::FilesystemBlobStore,
     };
 
+    const CLOUDFLARE_FREE_PRO_MAX_REQUEST_BYTES: usize = 100_000_000;
+
     #[tokio::test]
     async fn postgres_registry_flow_when_database_is_configured() {
         let Some(database_url) = std::env::var("JCR_DATABASE_URL").ok() else {
@@ -730,7 +732,7 @@ mod tests {
         mut headers: HeaderMap,
         body: Body,
     ) -> axum::response::Response {
-        let Ok(bytes) = to_bytes(body, 100 * 1024 * 1024).await else {
+        let Ok(bytes) = to_bytes(body, CLOUDFLARE_FREE_PRO_MAX_REQUEST_BYTES).await else {
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         };
         let request_host = headers

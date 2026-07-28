@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use jcr_core::BlobStore;
 use url::Url;
 
-use crate::storage::{FilesystemBlobStore, S3BlobStore, S3Options};
+use crate::storage::{BucketBlobStore, BucketOptions, FilesystemBlobStore};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistrationMode {
@@ -66,7 +66,7 @@ pub struct Config {
 #[derive(Clone, Debug)]
 pub enum StorageConfig {
     Filesystem { root: PathBuf },
-    S3(S3Options),
+    Bucket(BucketOptions),
 }
 
 impl Config {
@@ -120,13 +120,13 @@ impl Config {
             "filesystem" => StorageConfig::Filesystem {
                 root: PathBuf::from(env_or("JCR_FILESYSTEM_ROOT", ".data/storage")),
             },
-            "s3" => StorageConfig::S3(S3Options {
-                endpoint: required("JCR_S3_ENDPOINT")?,
-                region: env_or("JCR_S3_REGION", "auto"),
-                bucket: required("JCR_S3_BUCKET")?,
-                access_key_id: required("JCR_S3_ACCESS_KEY_ID")?,
-                secret_access_key: required("JCR_S3_SECRET_ACCESS_KEY")?,
-                force_path_style: parse_bool("JCR_S3_FORCE_PATH_STYLE", true)?,
+            "bucket" => StorageConfig::Bucket(BucketOptions {
+                endpoint: required("JCR_BUCKET_ENDPOINT")?,
+                region: env_or("JCR_BUCKET_REGION", "auto"),
+                bucket: required("JCR_BUCKET_NAME")?,
+                access_key_id: required("JCR_BUCKET_ACCESS_KEY_ID")?,
+                secret_access_key: required("JCR_BUCKET_SECRET_ACCESS_KEY")?,
+                force_path_style: parse_bool("JCR_BUCKET_FORCE_PATH_STYLE", true)?,
             }),
             backend => bail!("unsupported JCR_STORAGE_BACKEND '{backend}'"),
         };
@@ -153,7 +153,9 @@ impl Config {
             StorageConfig::Filesystem { root } => {
                 Ok(Arc::new(FilesystemBlobStore::new(root).await?))
             }
-            StorageConfig::S3(options) => Ok(Arc::new(S3BlobStore::new(options.clone()).await?)),
+            StorageConfig::Bucket(options) => {
+                Ok(Arc::new(BucketBlobStore::new(options.clone()).await?))
+            }
         }
     }
 }

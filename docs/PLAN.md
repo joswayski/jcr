@@ -6,7 +6,7 @@ Build only the JCR application in this repository:
 
 - A Rust OCI registry server named `jcrd`.
 - A Rust client named `jcr`.
-- A minimal owner-facing web UI.
+- A minimal web UI.
 - PostgreSQL metadata and an S3-compatible blob-storage adapter targeting R2.
 - Standards-compatible Docker/OCI authentication and pulls.
 - First-party chunked pushes that work beneath Cloudflare's request limit.
@@ -56,9 +56,9 @@ Implement:
 - Delayed garbage collection so shared layers are never removed immediately.
 
 Committed blobs live in an S3-compatible object store. Put all provider behavior
-behind a `BlobStore` interface and test it against MinIO locally; R2 is selected
-later through endpoint and credential configuration without R2-specific domain
-logic.
+behind a `BlobStore` interface and test it against Garage locally; R2 is
+selected later through endpoint and credential configuration without
+R2-specific domain logic.
 
 PostgreSQL stores accounts, permissions, repositories, upload sessions, blob
 metadata, manifests, descriptor relationships, tags, and audit events.
@@ -110,17 +110,17 @@ Do not implement `jcr pull` in v1; standard clients already provide it.
 ## Implementation sequence
 
 1. Add this plan, architecture decisions, the Cargo workspace, local
-   PostgreSQL/MinIO development services, configuration loading, migrations,
+   PostgreSQL/Garage development services, configuration loading, migrations,
    and CI checks.
-2. Implement the metadata model, S3 storage abstraction, digest handling, and
-   core OCI pull endpoints.
+2. Implement the metadata model, bucket storage abstraction, digest handling,
+   and core OCI pull endpoints.
 3. Implement normal user creation, Google allowlisting, browser sessions, PATs,
    bearer-token exchange, and repository authorization.
 4. Implement resumable OCI upload sessions, R2 multipart translation, digest
    finalization, deduplication, and cleanup.
 5. Implement local-Docker and OCI-archive support in `jcr push`, followed by
    credential interoperability and progress/resume behavior.
-6. Add the `/registry` owner UI, tag history, deletion, audit events, and
+6. Add the `/registry` web UI, tag history, deletion, audit events, and
    delayed garbage collection.
 7. Complete conformance and compatibility testing; stop without deploying
    externally.
@@ -143,7 +143,9 @@ Do not implement `jcr pull` in v1; standard clients already provide it.
 - Stock `docker push` works for requests within the local proxy limit but is not
   the supported large-upload path.
 - `jcr push` successfully uploads generated 500 MiB and 1 GiB incompressible
-  layers through a local reverse proxy capped at 100 MB.
+  layers through a local reverse proxy capped at Cloudflare Free/Pro's
+  100,000,000-byte per-request limit. These fixture sizes are not maximum blob
+  sizes.
 - Interrupted uploads resume without retransmitting acknowledged chunks,
   including after a `jcrd` restart.
 - Incorrect digests, out-of-order chunks, expired sessions, revoked PATs, and
@@ -151,7 +153,7 @@ Do not implement `jcr pull` in v1; standard clients already provide it.
 - Shared blobs survive deletion of one referencing tag or repository.
 - The OCI Distribution conformance suite passes for the advertised pull and
   push categories.
-- The same storage integration suite passes against MinIO and an explicitly
+- The same storage integration suite passes against Garage and an explicitly
   configured disposable R2 test bucket.
 
 ## Explicitly out of scope
