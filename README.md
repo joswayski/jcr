@@ -34,11 +34,9 @@ docker compose up -d
 Copy `.env.example` to `.env`. Replace the JWT secret and bootstrap email with
 real values. `jcrd` loads this file automatically for local development.
 
-The zero-dependency development default stores blobs on the filesystem. To run
-the application against the local Garage bucket instead, set:
+Configure the local Garage bucket:
 
 ```dotenv
-JCR_STORAGE_BACKEND=bucket
 JCR_BUCKET_ENDPOINT=http://127.0.0.1:9000
 JCR_BUCKET_REGION=garage
 JCR_BUCKET_NAME=jcr
@@ -110,14 +108,8 @@ audit metadata.
 ## Verification
 
 The normal local suite includes unit tests plus the PostgreSQL registry flow and
-the first-party client passing through a reverse proxy capped at `100,000,000`
-request-body bytes. This matches the 100 MB maximum upload size documented for
-Cloudflare Free and Pro traffic; Cloudflare recommends splitting larger
-uploads into smaller requests to avoid a `413`.
-[Cloudflare's limit varies by plan](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-413/).
-The limit applies to each HTTP request, not the complete image. A 64 MiB JCR
-chunk is about 67.1 MB, so a larger blob crosses the proxy as a sequence of
-individually accepted requests.
+the first-party client passing through a reverse proxy capped at
+[Cloudflare's 100 MB request limit](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-413/):
 
 ```console
 JCR_DATABASE_URL=postgres://jcr:jcr@127.0.0.1:5432/jcr \
@@ -146,9 +138,7 @@ The integration flow has opt-in compatibility gates:
 - `JCR_TEST_CONFORMANCE_BINARY=/path/to/conformance.test` runs the official OCI
   Distribution conformance binary with the advertised pull and push categories.
 - `JCR_LARGE_TEST_MIB=500` or `1024` generates an incompressible layer of that
-  size and sends it through the Cloudflare-sized proxy limit. Those are test
-  fixtures, not maximum blob sizes: larger blobs continue in additional 64 MiB
-  requests until the configured bucket provider's multipart-object limit.
+  size and sends it through the 100 MB-capped proxy.
 
 For example:
 

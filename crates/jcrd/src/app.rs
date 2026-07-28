@@ -74,10 +74,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::{Config, RegistrationMode, StorageConfig},
+        config::{Config, RegistrationMode},
         db::{self, VerifiedLogin},
         state::AppState,
-        storage::FilesystemBlobStore,
+        storage::{BucketOptions, FilesystemBlobStore},
     };
 
     const CLOUDFLARE_FREE_PRO_MAX_REQUEST_BYTES: usize = 100_000_000;
@@ -106,8 +106,13 @@ mod tests {
             upload_chunk_limit: 80 * 1024 * 1024,
             upload_session_hours: 24,
             gc_grace_days: 7,
-            storage: StorageConfig::Filesystem {
-                root: directory.path().join("objects"),
+            storage: BucketOptions {
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                region: "test".to_owned(),
+                bucket: "unused".to_owned(),
+                access_key_id: "unused".to_owned(),
+                secret_access_key: "unused".to_owned(),
+                force_path_style: true,
             },
         };
         let pool = db::connect_and_migrate(&config).await.unwrap();

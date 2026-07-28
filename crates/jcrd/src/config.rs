@@ -1,10 +1,10 @@
-use std::{env, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
+use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use jcr_core::BlobStore;
 use url::Url;
 
-use crate::storage::{BucketBlobStore, BucketOptions, FilesystemBlobStore};
+use crate::storage::{BucketBlobStore, BucketOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistrationMode {
@@ -60,13 +60,7 @@ pub struct Config {
     pub upload_chunk_limit: usize,
     pub upload_session_hours: i64,
     pub gc_grace_days: i64,
-    pub storage: StorageConfig,
-}
-
-#[derive(Clone, Debug)]
-pub enum StorageConfig {
-    Filesystem { root: PathBuf },
-    Bucket(BucketOptions),
+    pub storage: BucketOptions,
 }
 
 impl Config {
@@ -116,19 +110,13 @@ impl Config {
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| anyhow!("JCR_UPLOAD_CHUNK_LIMIT_MIB is too large"))?;
 
-        let storage = match env_or("JCR_STORAGE_BACKEND", "filesystem").as_str() {
-            "filesystem" => StorageConfig::Filesystem {
-                root: PathBuf::from(env_or("JCR_FILESYSTEM_ROOT", ".data/storage")),
-            },
-            "bucket" => StorageConfig::Bucket(BucketOptions {
-                endpoint: required("JCR_BUCKET_ENDPOINT")?,
-                region: env_or("JCR_BUCKET_REGION", "auto"),
-                bucket: required("JCR_BUCKET_NAME")?,
-                access_key_id: required("JCR_BUCKET_ACCESS_KEY_ID")?,
-                secret_access_key: required("JCR_BUCKET_SECRET_ACCESS_KEY")?,
-                force_path_style: parse_bool("JCR_BUCKET_FORCE_PATH_STYLE", true)?,
-            }),
-            backend => bail!("unsupported JCR_STORAGE_BACKEND '{backend}'"),
+        let storage = BucketOptions {
+            endpoint: required("JCR_BUCKET_ENDPOINT")?,
+            region: env_or("JCR_BUCKET_REGION", "auto"),
+            bucket: required("JCR_BUCKET_NAME")?,
+            access_key_id: required("JCR_BUCKET_ACCESS_KEY_ID")?,
+            secret_access_key: required("JCR_BUCKET_SECRET_ACCESS_KEY")?,
+            force_path_style: parse_bool("JCR_BUCKET_FORCE_PATH_STYLE", true)?,
         };
 
         Ok(Self {
@@ -149,14 +137,7 @@ impl Config {
     }
 
     pub async fn create_blob_store(&self) -> Result<Arc<dyn BlobStore>> {
-        match &self.storage {
-            StorageConfig::Filesystem { root } => {
-                Ok(Arc::new(FilesystemBlobStore::new(root).await?))
-            }
-            StorageConfig::Bucket(options) => {
-                Ok(Arc::new(BucketBlobStore::new(options.clone()).await?))
-            }
-        }
+        Ok(Arc::new(BucketBlobStore::new(self.storage.clone()).await?))
     }
 }
 

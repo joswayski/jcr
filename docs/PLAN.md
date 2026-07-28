@@ -143,9 +143,7 @@ Do not implement `jcr pull` in v1; standard clients already provide it.
 - Stock `docker push` works for requests within the local proxy limit but is not
   the supported large-upload path.
 - `jcr push` successfully uploads generated 500 MiB and 1 GiB incompressible
-  layers through a local reverse proxy capped at Cloudflare Free/Pro's
-  100,000,000-byte per-request limit. These fixture sizes are not maximum blob
-  sizes.
+  layers through a local reverse proxy capped at 100 MB.
 - Interrupted uploads resume without retransmitting acknowledged chunks,
   including after a `jcrd` restart.
 - Incorrect digests, out-of-order chunks, expired sessions, revoked PATs, and
