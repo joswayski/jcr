@@ -92,15 +92,16 @@ mod tests {
         let backend_address = backend_listener.local_addr().unwrap();
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = proxy_listener.local_addr().unwrap();
+        let owner_suffix = Uuid::new_v4().simple().to_string();
+        let owner_username = format!("owner-{}", &owner_suffix[..12]);
+        let owner_email = format!("{owner_username}@example.com");
         let config = Config {
             listen_address: backend_address,
             public_url: format!("http://{address}/").parse().unwrap(),
             database_url,
             jwt_secret: "integration-test-secret-with-at-least-32-bytes".to_owned(),
             registration_mode: RegistrationMode::Allowlist,
-            bootstrap_email: Some("jose@example.com".to_owned()),
-            bootstrap_username: "jose".to_owned(),
-            bootstrap_namespace: "jose".to_owned(),
+            admin_email: Some(owner_email.clone()),
             google: None,
             upload_chunk_limit: 80 * 1024 * 1024,
             upload_session_hours: 24,
@@ -124,31 +125,36 @@ mod tests {
             },
         };
         let pool = db::connect_and_migrate(&config).await.unwrap();
-        let jose = db::register_verified_identity(
-            &pool,
-            VerifiedLogin {
-                provider: "google".to_owned(),
-                subject: "jcr-integration-jose".to_owned(),
-                email: "jose@example.com".to_owned(),
-                email_verified: true,
-                display_name: Some("Jose Valerio".to_owned()),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(jose.username, "jose");
-        assert!(jose.is_instance_admin());
+        let owner_login = VerifiedLogin {
+            provider: "google".to_owned(),
+            subject: format!("jcr-integration-{owner_suffix}"),
+            email: owner_email,
+            email_verified: true,
+            display_name: Some("Registry Owner".to_owned()),
+        };
+        let owner = db::register_verified_identity(&pool, owner_login.clone(), &owner_username)
+            .await
+            .unwrap();
+        assert_eq!(owner.username, owner_username);
+        assert!(owner.is_instance_admin());
+        let existing_owner = db::existing_verified_user(&pool, &owner_login)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(existing_owner.id, owner.id);
         let role: String = sqlx::query_scalar(
             "SELECT m.role::text
              FROM namespace_memberships m
              JOIN namespaces n ON n.id = m.namespace_id
-             WHERE n.name = 'jose' AND m.user_id = $1",
+             WHERE n.name = $1 AND m.user_id = $2",
         )
-        .bind(jose.id)
+        .bind(&owner.username)
+        .bind(owner.id)
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(role, "admin");
+        let username = owner.username.clone();
 
         let denied_email = format!("denied-{}@example.com", Uuid::new_v4());
         let denied = db::register_verified_identity(
@@ -160,6 +166,7 @@ mod tests {
                 email_verified: true,
                 display_name: None,
             },
+            "denied",
         )
         .await;
         assert!(denied.is_err());
@@ -176,13 +183,11 @@ mod tests {
         let invite_username = format!("invite-{}", &invite_suffix[..12]);
         sqlx::query(
             "INSERT INTO registration_entries (
-                 id, email, reserved_username, reserved_namespace,
-                 instance_role, namespace_role, status
-             ) VALUES ($1, $2, $3, $3, 'user', 'admin', 'pending')",
+                 id, email, instance_role, namespace_role, status
+             ) VALUES ($1, $2, 'user', 'admin', 'pending')",
         )
         .bind(Uuid::new_v4())
         .bind(&invite_email)
-        .bind(&invite_username)
         .execute(&pool)
         .await
         .unwrap();
@@ -203,6 +208,7 @@ mod tests {
                 email_verified: true,
                 display_name: None,
             },
+            &invite_username,
         )
         .await;
         sqlx::query(
@@ -215,7 +221,7 @@ mod tests {
         .unwrap();
         assert_eq!(invited.unwrap().username, invite_username);
 
-        let issued = db::create_pat(&pool, jose.id, "integration", None)
+        let issued = db::create_pat(&pool, owner.id, "integration", None)
             .await
             .unwrap();
         let storage = config.create_blob_store().await.unwrap();
@@ -241,15 +247,21 @@ mod tests {
         });
         let basic = format!(
             "Basic {}",
-            STANDARD.encode(format!("jose:{}", issued.token))
+            STANDARD.encode(format!("{username}:{}", issued.token))
         );
 
-        let first_name = format!("jose/smoke-{}", &Uuid::new_v4().simple().to_string()[..8]);
-        let second_name = format!("jose/shared-{}", &Uuid::new_v4().simple().to_string()[..8]);
-        db::ensure_repository_for_push(&pool, &first_name, &jose)
+        let first_name = format!(
+            "{username}/smoke-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let second_name = format!(
+            "{username}/shared-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        db::ensure_repository_for_push(&pool, &first_name, &owner)
             .await
             .unwrap();
-        db::ensure_repository_for_push(&pool, &second_name, &jose)
+        db::ensure_repository_for_push(&pool, &second_name, &owner)
             .await
             .unwrap();
         let first_token = bearer_token(
@@ -519,7 +531,10 @@ mod tests {
         // Exercise the real first-party HTTP client against a live jcrd
         // listener. A 65 MiB layer must become one 64 MiB PATCH plus a small
         // final PUT, keeping every request below the configured 80 MiB cap.
-        let chunk_repository = format!("jose/chunks-{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let chunk_repository = format!(
+            "{username}/chunks-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
         let client_workspace = tempfile::tempdir().unwrap();
         let client_config = Bytes::from_static(br#"{"architecture":"amd64","os":"linux"}"#);
         let client_config_digest = Digest::sha256(&client_config);
@@ -594,7 +609,7 @@ mod tests {
         let remote = format!("{address}/{chunk_repository}:latest")
             .parse()
             .unwrap();
-        let network_client = RegistryClient::for_push(&remote, "jose", &issued.token)
+        let network_client = RegistryClient::for_push(&remote, &username, &issued.token)
             .await
             .unwrap();
         let resume = ResumeStore::at(directory.path().join("resume/uploads.json"))
@@ -638,15 +653,16 @@ mod tests {
 
         if let Some(binary) = std::env::var_os("JCR_TEST_CONFORMANCE_BINARY") {
             let suffix = &Uuid::new_v4().simple().to_string()[..8];
-            let namespace = format!("jose/conformance-{suffix}");
-            let cross_namespace = format!("jose/conformance-cross-{suffix}");
+            let namespace = format!("{username}/conformance-{suffix}");
+            let cross_namespace = format!("{username}/conformance-cross-{suffix}");
             let password = issued.token.clone();
+            let conformance_username = username.clone();
             let output = tokio::task::spawn_blocking(move || {
                 Command::new(binary)
                     .env("OCI_ROOT_URL", format!("http://{address}"))
                     .env("OCI_NAMESPACE", namespace)
                     .env("OCI_CROSSMOUNT_NAMESPACE", cross_namespace)
-                    .env("OCI_USERNAME", "jose")
+                    .env("OCI_USERNAME", conformance_username)
                     .env("OCI_PASSWORD", password)
                     .env("OCI_TEST_PULL", "1")
                     .env("OCI_TEST_PUSH", "1")
@@ -669,15 +685,21 @@ mod tests {
         if std::env::var("JCR_TEST_DOCKER_CLIENT").as_deref() == Ok("1") {
             let password = issued.token.clone();
             let docker_registry = std::env::var("JCR_TEST_DOCKER_REGISTRY").ok();
+            let docker_username = username.clone();
             tokio::task::spawn_blocking(move || {
-                docker_compatibility(address, docker_registry.as_deref(), &password)
+                docker_compatibility(
+                    address,
+                    docker_registry.as_deref(),
+                    &docker_username,
+                    &password,
+                )
             })
             .await
             .unwrap()
             .unwrap();
         }
 
-        db::revoke_pat(&pool, jose.id, issued.id).await.unwrap();
+        db::revoke_pat(&pool, owner.id, issued.id).await.unwrap();
         let revoked = request(
             &application,
             Request::get("/auth/token?service=jcr")
@@ -793,18 +815,19 @@ mod tests {
     fn docker_compatibility(
         proxy_address: SocketAddr,
         registry_override: Option<&str>,
+        username: &str,
         password: &str,
     ) -> Result<()> {
         if registry_override.is_none() && cfg!(target_os = "macos") {
-            return docker_compatibility_in_dind(proxy_address.port(), password);
+            return docker_compatibility_in_dind(proxy_address.port(), username, password);
         }
         let registry = registry_override
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| proxy_address.to_string());
-        docker_compatibility_on_host(&registry, password)
+        docker_compatibility_on_host(&registry, username, password)
     }
 
-    fn docker_compatibility_on_host(registry: &str, password: &str) -> Result<()> {
+    fn docker_compatibility_on_host(registry: &str, username: &str, password: &str) -> Result<()> {
         let docker_config = tempfile::tempdir()?;
         let config_file = docker_config.path().join("config.json");
         let context = tempfile::tempdir()?;
@@ -814,13 +837,13 @@ mod tests {
         )?;
         std::fs::write(context.path().join("hello.txt"), "hello from JCR\n")?;
         let reference = format!(
-            "{registry}/jose/docker-{}:latest",
+            "{registry}/{username}/docker-{}:latest",
             &Uuid::new_v4().simple().to_string()[..8]
         );
 
         let mut login = docker_command(docker_config.path());
         login
-            .args(["login", registry, "--username", "jose"])
+            .args(["login", registry, "--username", username])
             .arg("--password-stdin")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -836,11 +859,11 @@ mod tests {
 
         let stored = DockerCredentials::get_from_path(&config_file, registry)?
             .context("JCR could not read credentials written by Docker")?;
-        if stored.username != "jose" || stored.secret != password {
+        if stored.username != username || stored.secret != password {
             bail!("JCR read different credentials than Docker stored");
         }
         run_docker(docker_config.path(), ["logout", registry], "docker logout")?;
-        DockerCredentials::store_at(&config_file, registry, "jose", password)?;
+        DockerCredentials::store_at(&config_file, registry, username, password)?;
 
         let mut build = docker_command(docker_config.path());
         build
@@ -1004,14 +1027,14 @@ mod tests {
         }
     }
 
-    fn docker_compatibility_in_dind(proxy_port: u16, password: &str) -> Result<()> {
+    fn docker_compatibility_in_dind(proxy_port: u16, username: &str, password: &str) -> Result<()> {
         let harness = DockerDind::start(proxy_port)?;
         let docker_config = "/tmp/jcr-docker";
         let docker_config_file = format!("{docker_config}/config.json");
         let local_config_directory = tempfile::tempdir()?;
         let local_config = local_config_directory.path().join("config.json");
         let reference = format!(
-            "{}/jose/docker-{}:latest",
+            "{}/{username}/docker-{}:latest",
             harness.registry,
             &Uuid::new_v4().simple().to_string()[..8]
         );
@@ -1023,7 +1046,7 @@ mod tests {
 
         let mut login = harness.command(docker_config);
         login
-            .args(["login", &harness.registry, "--username", "jose"])
+            .args(["login", &harness.registry, "--username", username])
             .arg("--password-stdin")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1040,7 +1063,7 @@ mod tests {
         std::fs::write(&local_config, harness.read_file(&docker_config_file)?)?;
         let stored = DockerCredentials::get_from_path(&local_config, &harness.registry)?
             .context("JCR could not read credentials written by Docker")?;
-        if stored.username != "jose" || stored.secret != password {
+        if stored.username != username || stored.secret != password {
             bail!("JCR read different credentials than Docker stored");
         }
         harness.run(
@@ -1048,7 +1071,7 @@ mod tests {
             ["logout", &harness.registry],
             "docker logout",
         )?;
-        DockerCredentials::store_at(&local_config, &harness.registry, "jose", password)?;
+        DockerCredentials::store_at(&local_config, &harness.registry, username, password)?;
         harness.write_file(&docker_config_file, &std::fs::read(&local_config)?)?;
 
         let import_script = format!(

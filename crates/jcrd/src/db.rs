@@ -9,7 +9,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use jcr_core::AccessAction;
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -35,7 +35,7 @@ impl User {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VerifiedLogin {
     pub provider: String,
     pub subject: String,
@@ -82,6 +82,13 @@ pub struct BrowserSession {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, FromRow)]
+struct RegistrationEntry {
+    id: Uuid,
+    instance_role: String,
+    namespace_role: String,
+}
+
 pub async fn connect_and_migrate(config: &Config) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -104,32 +111,21 @@ pub async fn connect_and_migrate(config: &Config) -> anyhow::Result<PgPool> {
     .await
     .context("failed to configure registration mode")?;
 
-    if let Some(email) = &config.bootstrap_email {
-        seed_bootstrap_registration(
-            &pool,
-            email,
-            &config.bootstrap_username,
-            &config.bootstrap_namespace,
-        )
-        .await
-        .context("failed to seed bootstrap registration")?;
+    if let Some(email) = &config.admin_email {
+        seed_admin_registration(&pool, email)
+            .await
+            .context("failed to seed administrator registration")?;
     }
 
     Ok(pool)
 }
 
-async fn seed_bootstrap_registration(
-    pool: &PgPool,
-    email: &str,
-    username: &str,
-    namespace: &str,
-) -> Result<(), sqlx::Error> {
+async fn seed_admin_registration(pool: &PgPool, email: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO registration_entries (
-             id, email, reserved_username, reserved_namespace,
-             instance_role, namespace_role, status
+             id, email, instance_role, namespace_role, status
          )
-         SELECT $1, $2, $3, $4, 'admin', 'admin', 'pending'
+         SELECT $1, $2, 'admin', 'admin', 'pending'
          WHERE NOT EXISTS (
              SELECT 1 FROM users WHERE LOWER(primary_email) = LOWER($2)
          )
@@ -137,17 +133,15 @@ async fn seed_bootstrap_registration(
     )
     .bind(Uuid::new_v4())
     .bind(email)
-    .bind(username)
-    .bind(namespace)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn register_verified_identity(
+pub async fn existing_verified_user(
     pool: &PgPool,
-    login: VerifiedLogin,
-) -> Result<User, AppError> {
+    login: &VerifiedLogin,
+) -> Result<Option<User>, AppError> {
     if !login.email_verified {
         return Err(AppError::Denied(
             "the identity provider did not verify this email".to_owned(),
@@ -177,9 +171,62 @@ pub async fn register_verified_identity(
         .bind(&login.email)
         .execute(pool)
         .await?;
-        return Ok(user);
+        return Ok(Some(user));
     }
 
+    Ok(None)
+}
+
+pub async fn ensure_registration_allowed(pool: &PgPool, email: &str) -> Result<(), AppError> {
+    let mode: String = sqlx::query_scalar(
+        "SELECT registration_mode::text
+         FROM instance_settings
+         WHERE singleton = TRUE",
+    )
+    .fetch_one(pool)
+    .await?;
+    let mode = RegistrationMode::from_str(&mode).map_err(AppError::Internal)?;
+
+    match mode {
+        RegistrationMode::Closed => Err(AppError::Denied("registration is closed".to_owned())),
+        RegistrationMode::Open => Ok(()),
+        RegistrationMode::Allowlist | RegistrationMode::Invite => {
+            let allowed: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1
+                     FROM registration_entries
+                     WHERE LOWER(email) = LOWER($1)
+                       AND status = 'pending'
+                       AND (expires_at IS NULL OR expires_at > NOW())
+                 )",
+            )
+            .bind(email.trim())
+            .fetch_one(pool)
+            .await?;
+            if allowed {
+                Ok(())
+            } else {
+                Err(AppError::Denied(
+                    "this verified email is not allowed to register".to_owned(),
+                ))
+            }
+        }
+    }
+}
+
+pub async fn register_verified_identity(
+    pool: &PgPool,
+    login: VerifiedLogin,
+    requested_username: &str,
+) -> Result<User, AppError> {
+    if !login.email_verified {
+        return Err(AppError::Denied(
+            "the identity provider did not verify this email".to_owned(),
+        ));
+    }
+
+    let username = normalize_username(requested_username)?;
+    let namespace = username.clone();
     let mut transaction = pool.begin().await?;
     let mode: String = sqlx::query_scalar(
         "SELECT registration_mode::text
@@ -191,18 +238,8 @@ pub async fn register_verified_identity(
     .await?;
     let mode = RegistrationMode::from_str(&mode).map_err(AppError::Internal)?;
 
-    #[derive(FromRow)]
-    struct RegistrationEntry {
-        id: Uuid,
-        reserved_username: Option<String>,
-        reserved_namespace: Option<String>,
-        instance_role: String,
-        namespace_role: String,
-    }
-
     let entry = sqlx::query_as::<_, RegistrationEntry>(
-        "SELECT id, reserved_username, reserved_namespace,
-                instance_role::text AS instance_role,
+        "SELECT id, instance_role::text AS instance_role,
                 namespace_role::text AS namespace_role
          FROM registration_entries
          WHERE LOWER(email) = LOWER($1)
@@ -214,7 +251,7 @@ pub async fn register_verified_identity(
     .fetch_optional(&mut *transaction)
     .await?;
 
-    let (entry, username, namespace, instance_role, namespace_role) = match (mode, entry) {
+    let (entry_id, instance_role, namespace_role) = match (mode, entry) {
         (RegistrationMode::Closed, _) => {
             return Err(AppError::Denied("registration is closed".to_owned()));
         }
@@ -223,35 +260,8 @@ pub async fn register_verified_identity(
                 "this verified email is not allowed to register".to_owned(),
             ));
         }
-        (_, Some(entry)) => {
-            let username = entry
-                .reserved_username
-                .clone()
-                .unwrap_or_else(|| username_from_email(&login.email));
-            let namespace = entry
-                .reserved_namespace
-                .clone()
-                .unwrap_or_else(|| username.clone());
-            let instance_role = entry.instance_role.clone();
-            let namespace_role = entry.namespace_role.clone();
-            (
-                Some(entry),
-                username,
-                namespace,
-                instance_role,
-                namespace_role,
-            )
-        }
-        (RegistrationMode::Open, None) => {
-            let username = available_username(&mut transaction, &login.email).await?;
-            (
-                None,
-                username.clone(),
-                username,
-                "user".to_owned(),
-                "admin".to_owned(),
-            )
-        }
+        (_, Some(entry)) => (Some(entry.id), entry.instance_role, entry.namespace_role),
+        (RegistrationMode::Open, None) => (None, "user".to_owned(), "admin".to_owned()),
     };
 
     let user_id = Uuid::new_v4();
@@ -309,13 +319,13 @@ pub async fn register_verified_identity(
     .execute(&mut *transaction)
     .await?;
 
-    if let Some(entry) = entry {
+    if let Some(entry_id) = entry_id {
         sqlx::query(
             "UPDATE registration_entries
              SET status = 'claimed', claimed_by = $2, claimed_at = NOW()
              WHERE id = $1",
         )
-        .bind(entry.id)
+        .bind(entry_id)
         .bind(user_id)
         .execute(&mut *transaction)
         .await?;
@@ -336,57 +346,35 @@ pub async fn register_verified_identity(
     Ok(user)
 }
 
-async fn available_username(
-    transaction: &mut Transaction<'_, Postgres>,
-    email: &str,
-) -> Result<String, AppError> {
-    let base = username_from_email(email);
-    for suffix in 0..1000 {
-        let candidate = if suffix == 0 {
-            base.clone()
-        } else {
-            format!("{base}-{suffix}")
-        };
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))",
-        )
-        .bind(&candidate)
-        .fetch_one(&mut **transaction)
-        .await?;
-        if !exists {
-            return Ok(candidate);
-        }
+fn normalize_username(value: &str) -> Result<String, AppError> {
+    let username = value.trim().to_ascii_lowercase();
+    if username.is_empty() || username.len() > 64 {
+        return Err(AppError::BadRequest(
+            "username must contain 1 to 64 characters".to_owned(),
+        ));
     }
-    Err(AppError::Conflict(
-        "could not allocate a unique username".to_owned(),
-    ))
-}
 
-fn username_from_email(email: &str) -> String {
-    let local = email
-        .split('@')
-        .next()
-        .unwrap_or("user")
-        .to_ascii_lowercase();
-    let mut output = String::new();
-    let mut previous_separator = false;
-    for character in local.chars() {
-        if character.is_ascii_lowercase() || character.is_ascii_digit() {
-            output.push(character);
-            previous_separator = false;
-        } else if !previous_separator && !output.is_empty() {
-            output.push('-');
-            previous_separator = true;
+    let mut previous_was_separator = false;
+    for (index, byte) in username.bytes().enumerate() {
+        let is_alphanumeric = byte.is_ascii_lowercase() || byte.is_ascii_digit();
+        let is_separator = matches!(byte, b'.' | b'_' | b'-');
+        if is_alphanumeric {
+            previous_was_separator = false;
+        } else if is_separator && index > 0 && !previous_was_separator {
+            previous_was_separator = true;
+        } else {
+            return Err(AppError::BadRequest(
+                "username may contain lowercase letters, numbers, and single . _ - separators"
+                    .to_owned(),
+            ));
         }
     }
-    while output.ends_with('-') {
-        output.pop();
+    if previous_was_separator {
+        return Err(AppError::BadRequest(
+            "username must end with a letter or number".to_owned(),
+        ));
     }
-    if output.is_empty() {
-        "user".to_owned()
-    } else {
-        output
-    }
+    Ok(username)
 }
 
 fn map_unique_registration_error(error: sqlx::Error) -> AppError {
@@ -942,12 +930,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derives_safe_username_from_email() {
-        assert_eq!(
-            username_from_email("Jose.Valerio+test@example.com"),
-            "jose-valerio-test"
-        );
-        assert_eq!(username_from_email("@example.com"), "user");
+    fn validates_and_normalizes_usernames() {
+        assert_eq!(normalize_username(" Alice.Dev ").unwrap(), "alice.dev");
+        assert!(normalize_username("alice--dev").is_err());
+        assert!(normalize_username("-alice").is_err());
+        assert!(normalize_username("alice-").is_err());
+        assert!(normalize_username("alice/dev").is_err());
     }
 
     #[test]

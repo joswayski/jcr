@@ -16,19 +16,20 @@ belongs in a future infrastructure repository or task.
 
 ## Identity and authentication
 
-- Model `jose` as a normal user with a normal personal namespace named `jose`.
 - Store users, verified identities, namespaces, memberships, repository
   permissions, personal access tokens, and registration invitations/allowlist
   entries in PostgreSQL.
 - Use configurable registration modes: `closed`, `allowlist`, `invite`, and
   `open`.
-- Default v1 to `allowlist`, containing only Jose's configured, verified Google
-  email.
-- Seed the allowlist with username `jose`, namespace `jose`, namespace role
-  `admin`, and instance role `admin`.
-- On first Google login, run the same account-creation transaction future
-  invited users will use; the allowlist entry supplies the preassigned username
-  and roles.
+- Default v1 to `allowlist`. A fresh installation has no users and permits no
+  registrations until its operator configures an administrator email or adds a
+  registration entry.
+- A configured administrator email grants that verified identity permission to
+  register with the instance and personal-namespace `admin` roles. It does not
+  create an account or reserve a username.
+- After the first eligible Google login, ask the user to choose a username and
+  create a matching personal namespace through the same account-creation
+  transaction used for every future user.
 - Reject every other email without creating a partial user record.
 - Use secure browser sessions for the UI and personal access tokens for Docker,
   the JCR CLI, and CI.
@@ -127,12 +128,13 @@ Do not implement `jcr pull` in v1; standard clients already provide it.
 
 ## Test and acceptance criteria
 
-- Jose's allowed Google identity creates a regular `jose` user and namespace
-  through the standard account flow.
+- A fresh installation contains no account, namespace, or reserved username.
+- The configured administrator identity chooses its username through the
+  standard account flow and receives a matching personal namespace.
 - A different valid Google identity is denied and leaves no user record.
 - Changing registration configuration—not application code—allows a second
   invited user.
-- `docker login registry-host` succeeds using `jose` plus a PAT.
+- `docker login registry-host` succeeds using the chosen username plus a PAT.
 - Anonymous public pulls succeed; anonymous private pulls and all anonymous
   pushes fail.
 - Repository-scoped tokens cannot access another repository.

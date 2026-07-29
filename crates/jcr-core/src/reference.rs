@@ -129,11 +129,11 @@ mod tests {
 
     #[test]
     fn parses_tag_and_default_tag() {
-        let tagged: ImageReference = "registry.example.com/jose/app:v1".parse().unwrap();
-        assert_eq!(tagged.repository, "jose/app");
+        let tagged: ImageReference = "registry.example.com/alice/app:v1".parse().unwrap();
+        assert_eq!(tagged.repository, "alice/app");
         assert_eq!(tagged.reference, "v1");
 
-        let latest: ImageReference = "localhost:5000/jose/app".parse().unwrap();
+        let latest: ImageReference = "localhost:5000/alice/app".parse().unwrap();
         assert_eq!(latest.reference, "latest");
         assert_eq!(latest.scheme(), "http");
     }
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn parses_digest_reference() {
         let value = format!(
-            "registry.example.com/jose/app@{}",
+            "registry.example.com/alice/app@{}",
             Digest::sha256(b"manifest")
         );
         let reference: ImageReference = value.parse().unwrap();

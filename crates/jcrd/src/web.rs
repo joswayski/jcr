@@ -5,8 +5,9 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, Utc};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use maud::{DOCTYPE, Markup, PreEscaped, html};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use tower_cookies::{Cookie, Cookies, cookie::SameSite};
 use uuid::Uuid;
@@ -18,6 +19,8 @@ use crate::{
 };
 
 const SESSION_COOKIE: &str = "jcr_session";
+const SIGNUP_AUDIENCE: &str = "jcr-signup";
+const SIGNUP_TICKET_LIFETIME_MINUTES: i64 = 10;
 
 #[derive(FromRow)]
 struct RepositoryView {
@@ -79,6 +82,7 @@ pub fn router() -> Router<AppState> {
         .route("/registry/", get(index))
         .route("/registry/login", get(login))
         .route("/registry/auth/callback", get(callback))
+        .route("/registry/signup", post(signup))
         .route("/registry/logout", post(logout))
         .route("/registry/tokens", post(create_pat))
         .route("/registry/tokens/{id}/revoke", post(revoke_pat))
@@ -263,6 +267,15 @@ struct GoogleUser {
     name: Option<String>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct SignupClaims {
+    aud: String,
+    exp: usize,
+    iat: usize,
+    login: VerifiedLogin,
+    return_to: String,
+}
+
 async fn callback(
     State(state): State<AppState>,
     cookies: Cookies,
@@ -325,20 +338,132 @@ async fn callback(
         .await
         .map_err(|error| AppError::Internal(error.into()))?;
 
-    let user = db::register_verified_identity(
-        &state.pool,
-        VerifiedLogin {
-            provider: "google".to_owned(),
-            subject: profile.sub,
-            email: profile.email,
-            email_verified: profile.email_verified,
-            display_name: profile.name,
-        },
+    let login = VerifiedLogin {
+        provider: "google".to_owned(),
+        subject: profile.sub,
+        email: profile.email,
+        email_verified: profile.email_verified,
+        display_name: profile.name,
+    };
+    if let Some(user) = db::existing_verified_user(&state.pool, &login).await? {
+        let (raw_session, _) = db::create_browser_session(&state.pool, user.id).await?;
+        set_session_cookie(&state, &cookies, raw_session);
+        return Ok(Redirect::to(&safe_return_to(return_to)).into_response());
+    }
+
+    db::ensure_registration_allowed(&state.pool, &login.email).await?;
+    let email = login.email.clone();
+    let ticket = encode_signup_ticket(&state, login, safe_return_to(return_to))?;
+    Ok(render(
+        "Create your JCR account",
+        signup_page(&email, &ticket, "", None),
     )
-    .await?;
-    let (raw_session, _) = db::create_browser_session(&state.pool, user.id).await?;
-    set_session_cookie(&state, &cookies, raw_session);
-    Ok(Redirect::to(&return_to).into_response())
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct SignupForm {
+    ticket: String,
+    username: String,
+}
+
+async fn signup(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<SignupForm>,
+) -> Result<Response, AppError> {
+    let claims = decode_signup_ticket(&state, &form.ticket)?;
+    let email = claims.login.email.clone();
+    let return_to = safe_return_to(claims.return_to);
+    match db::register_verified_identity(&state.pool, claims.login, &form.username).await {
+        Ok(user) => {
+            let (raw_session, _) = db::create_browser_session(&state.pool, user.id).await?;
+            set_session_cookie(&state, &cookies, raw_session);
+            Ok(Redirect::to(&return_to).into_response())
+        }
+        Err(error @ (AppError::BadRequest(_) | AppError::Conflict(_))) => {
+            let message = error.to_string();
+            Ok(render(
+                "Create your JCR account",
+                signup_page(&email, &form.ticket, &form.username, Some(&message)),
+            )
+            .into_response())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn encode_signup_ticket(
+    state: &AppState,
+    login: VerifiedLogin,
+    return_to: String,
+) -> Result<String, AppError> {
+    let now = Utc::now();
+    let claims = SignupClaims {
+        aud: SIGNUP_AUDIENCE.to_owned(),
+        exp: (now + Duration::minutes(SIGNUP_TICKET_LIFETIME_MINUTES)).timestamp() as usize,
+        iat: now.timestamp() as usize,
+        login,
+        return_to,
+    };
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+    )
+    .map_err(|error| AppError::Internal(error.into()))
+}
+
+fn decode_signup_ticket(state: &AppState, token: &str) -> Result<SignupClaims, AppError> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&[SIGNUP_AUDIENCE]);
+    decode::<SignupClaims>(
+        token,
+        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &validation,
+    )
+    .map(|decoded| decoded.claims)
+    .map_err(|_| AppError::Denied("signup is invalid or expired; sign in again".to_owned()))
+}
+
+fn safe_return_to(value: String) -> String {
+    if value.starts_with('/') && !value.starts_with("//") {
+        value
+    } else {
+        "/registry".to_owned()
+    }
+}
+
+fn signup_page(email: &str, ticket: &str, username: &str, error: Option<&str>) -> Markup {
+    html! {
+        section class="hero" {
+            p class="eyebrow" { "Create account" }
+            h1 { "Choose your JCR username." }
+            p {
+                "Signed in as " strong { (email) } ". Your personal namespace will use the same name."
+            }
+            @if let Some(error) = error {
+                p class="notice" { (error) }
+            }
+            form method="post" action="/registry/signup" class="stack signup" {
+                input type="hidden" name="ticket" value=(ticket);
+                label {
+                    "Username"
+                    input
+                        name="username"
+                        value=(username)
+                        placeholder="your-name"
+                        autocomplete="username"
+                        autocapitalize="none"
+                        spellcheck="false"
+                        maxlength="64"
+                        pattern="[A-Za-z0-9]+([._-][A-Za-z0-9]+)*"
+                        required;
+                }
+                button type="submit" { "Create account" }
+            }
+        }
+    }
 }
 
 async fn logout(

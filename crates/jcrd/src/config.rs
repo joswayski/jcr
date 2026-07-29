@@ -53,9 +53,7 @@ pub struct Config {
     pub database_url: String,
     pub jwt_secret: String,
     pub registration_mode: RegistrationMode,
-    pub bootstrap_email: Option<String>,
-    pub bootstrap_username: String,
-    pub bootstrap_namespace: String,
+    pub admin_email: Option<String>,
     pub google: Option<GoogleOAuthConfig>,
     pub upload_chunk_limit: usize,
     pub upload_session_hours: i64,
@@ -77,15 +75,13 @@ impl Config {
         }
 
         let registration_mode = env_or("JCR_REGISTRATION_MODE", "allowlist").parse()?;
-        let bootstrap_email = optional("JCR_BOOTSTRAP_EMAIL")
+        let admin_email = optional("JCR_ADMIN_EMAIL")
             .map(|email| email.trim().to_ascii_lowercase())
             .filter(|email| !email.is_empty());
-        let bootstrap_username = env_or("JCR_BOOTSTRAP_USERNAME", "jose");
-        let bootstrap_namespace = env_or("JCR_BOOTSTRAP_NAMESPACE", "jose");
 
-        if registration_mode == RegistrationMode::Allowlist && bootstrap_email.is_none() {
+        if registration_mode == RegistrationMode::Allowlist && admin_email.is_none() {
             tracing::warn!(
-                "registration is allowlist-only but JCR_BOOTSTRAP_EMAIL is unset; no new account can be created"
+                "registration is allowlist-only but JCR_ADMIN_EMAIL is unset; no new account can be created"
             );
         }
 
@@ -125,9 +121,7 @@ impl Config {
             database_url,
             jwt_secret,
             registration_mode,
-            bootstrap_email,
-            bootstrap_username,
-            bootstrap_namespace,
+            admin_email,
             google,
             upload_chunk_limit,
             upload_session_hours: parse_i64("JCR_UPLOAD_SESSION_HOURS", 24)?,

@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn parses_bearer_challenge_fields_with_comma_scopes() {
-        let challenge = "Bearer realm=\"https://registry.example/auth/token\",service=\"jcr\",scope=\"repository:jose/app:pull,push\"";
+        let challenge = "Bearer realm=\"https://registry.example/auth/token\",service=\"jcr\",scope=\"repository:alice/app:pull,push\"";
         assert_eq!(
             challenge_field(challenge, "realm").as_deref(),
             Some("https://registry.example/auth/token")

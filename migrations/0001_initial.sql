@@ -50,8 +50,6 @@ CREATE INDEX verified_identities_user_idx ON verified_identities (user_id);
 CREATE TABLE registration_entries (
     id UUID PRIMARY KEY,
     email TEXT NOT NULL,
-    reserved_username TEXT,
-    reserved_namespace TEXT,
     instance_role instance_role NOT NULL DEFAULT 'user',
     namespace_role namespace_role NOT NULL DEFAULT 'admin',
     status registration_entry_status NOT NULL DEFAULT 'pending',

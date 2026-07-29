@@ -116,15 +116,15 @@ mod tests {
 
     #[test]
     fn parses_repository_scope() {
-        let scope: RepositoryScope = "repository:jose/app:pull,push".parse().unwrap();
-        assert!(scope.permits("jose/app", AccessAction::Pull));
-        assert!(scope.permits("jose/app", AccessAction::Push));
-        assert!(!scope.permits("jose/other", AccessAction::Pull));
+        let scope: RepositoryScope = "repository:alice/app:pull,push".parse().unwrap();
+        assert!(scope.permits("alice/app", AccessAction::Pull));
+        assert!(scope.permits("alice/app", AccessAction::Push));
+        assert!(!scope.permits("alice/other", AccessAction::Pull));
     }
 
     #[test]
     fn admin_implies_repository_actions() {
-        let scope = RepositoryScope::new("jose/app", [AccessAction::Admin]);
-        assert!(scope.permits("jose/app", AccessAction::Delete));
+        let scope = RepositoryScope::new("alice/app", [AccessAction::Admin]);
+        assert!(scope.permits("alice/app", AccessAction::Delete));
     }
 }

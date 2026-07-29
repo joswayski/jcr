@@ -1626,11 +1626,11 @@ mod tests {
 
     #[test]
     fn parses_nested_repository_routes() {
-        let endpoint = parse_endpoint("jose/tools/app/blobs/uploads/123").unwrap();
+        let endpoint = parse_endpoint("alice/tools/app/blobs/uploads/123").unwrap();
         assert!(matches!(
             endpoint,
             Endpoint::Upload { repository, id }
-                if repository == "jose/tools/app" && id == "123"
+                if repository == "alice/tools/app" && id == "123"
         ));
     }
 

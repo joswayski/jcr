@@ -275,10 +275,10 @@ mod tests {
 
     #[test]
     fn decodes_basic_credentials() {
-        let value = format!("Basic {}", STANDARD.encode("jose:jcr_pat_prefix_secret"));
+        let value = format!("Basic {}", STANDARD.encode("alice:jcr_pat_prefix_secret"));
         assert_eq!(
             decode_basic(&value),
-            Some(("jose".to_owned(), "jcr_pat_prefix_secret".to_owned()))
+            Some(("alice".to_owned(), "jcr_pat_prefix_secret".to_owned()))
         );
     }
 }

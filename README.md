@@ -31,8 +31,34 @@ Start PostgreSQL and Garage:
 docker compose up -d
 ```
 
-Copy `.env.example` to `.env`. Replace the JWT secret and bootstrap email with
-real values. `jcrd` loads this file automatically for local development.
+Compose runs the two local dependencies; run `jcrd` on the host with Cargo.
+
+Copy `.env.example` to `.env`. Generate a JWT secret, then set
+`JCR_ADMIN_EMAIL` to the Google account that should be allowed to register:
+
+```console
+cp .env.example .env
+openssl rand -hex 32
+```
+
+Create a [Google OAuth client](https://developers.google.com/identity/protocols/oauth2/web-server#creatingcred)
+with the **Web application** type and add this exact authorized redirect URI:
+
+```text
+http://127.0.0.1:5000/registry/auth/callback
+```
+
+Put its client ID and secret in `.env`:
+
+```dotenv
+JCR_JWT_SECRET=paste-the-generated-value
+JCR_ADMIN_EMAIL=you@example.com
+JCR_GOOGLE_CLIENT_ID=your-client-id
+JCR_GOOGLE_CLIENT_SECRET=your-client-secret
+JCR_GOOGLE_REDIRECT_URL=http://127.0.0.1:5000/registry/auth/callback
+```
+
+`jcrd` loads `.env` automatically for local development.
 
 Configure the local Garage bucket:
 
@@ -51,13 +77,11 @@ Start the server:
 cargo run -p jcrd
 ```
 
-The local server listens on `http://127.0.0.1:5000`.
-
-Google login is enabled only when all three Google OAuth settings in
-`.env.example` are present. The first verified login matching
-`JCR_BOOTSTRAP_EMAIL` creates the ordinary `jose` account and namespace. Every
-other identity is rejected in the default `allowlist` mode without creating a
-user.
+Open `http://127.0.0.1:5000/registry`, continue with the configured Google
+account, and choose a username. JCR creates the account and matching personal
+namespace in the normal registration transaction. No account or username is
+created or reserved by default. Every other identity is rejected in the
+default `allowlist` mode without creating a user.
 
 ## Using the clients
 
@@ -65,8 +89,8 @@ Create a personal access token in the `/registry` web UI, then use it with
 either client.
 
 ```console
-jcr login 127.0.0.1:5000 --username jose
-docker login 127.0.0.1:5000 --username jose
+jcr login 127.0.0.1:5000 --username YOUR_USERNAME
+docker login 127.0.0.1:5000 --username YOUR_USERNAME
 ```
 
 Credentials written by either command use Docker's configured credential
@@ -75,7 +99,9 @@ helper and are readable by the other.
 Push a single-platform image from the local Docker Engine:
 
 ```console
-cargo run -p jcr -- push local-image:latest 127.0.0.1:5000/jose/app:latest
+cargo run -p jcr -- push \
+  local-image:latest \
+  127.0.0.1:5000/YOUR_USERNAME/app:latest
 ```
 
 Push a single- or multi-platform OCI archive:
@@ -83,7 +109,7 @@ Push a single- or multi-platform OCI archive:
 ```console
 cargo run -p jcr -- push \
   --oci-archive ./image.tar \
-  127.0.0.1:5000/jose/app:latest
+  127.0.0.1:5000/YOUR_USERNAME/app:latest
 ```
 
 Different blobs upload concurrently. Each blob uses ordered 64 MiB `PATCH`
@@ -91,7 +117,7 @@ requests, a final `PUT`, transient-failure retries, and persisted resume state.
 The result is an ordinary OCI image, so pulls use standard clients:
 
 ```console
-docker pull 127.0.0.1:5000/jose/app:latest
+docker pull 127.0.0.1:5000/YOUR_USERNAME/app:latest
 ```
 
 ## Storage configuration
