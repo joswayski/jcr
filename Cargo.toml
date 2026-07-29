@@ -32,7 +32,7 @@ hex = "0.4"
 http = "1"
 http-body-util = "0.1"
 indicatif = "0.18"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 maud = { version = "0.27", features = ["axum"] }
 mime = "0.3"
 percent-encoding = "2"
